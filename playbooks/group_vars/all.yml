@@ -1,0 +1,26 @@
+# Global SSM over Ansible
+ansible_connection: amazon.aws.aws_ssm
+ansible_aws_ssm_region: us-east-1
+ansible_user: ssm-user
+
+# Privilege escalation
+ansible_become: true
+ansible_become_user: root
+ansible_become_method: sudo
+
+# Transport: S3 with bucket-side default encryption (SSE-S3 or SSE-KMS).
+# Ensure the S3 bucket has default encryption and a policy requiring it.
+ansible_aws_ssm_transfer_method: s3
+ansible_aws_ssm_bucket_name: pmack-ansible-ssm-staging
+ansible_aws_ssm_bucket_prefix: ansible-ssm/
+
+# Optional: to bypass S3 for debugging, switch to streaming.
+# ansible_aws_ssm_transfer_method: streaming
+# ansible_aws_ssm_bucket_name:
+# ansible_aws_ssm_bucket_prefix:
+
+ansible_shell_type: sh
+ansible_shell_executable: /bin/sh
+ansible_remote_tmp: /tmp/.ansible-ssm
+ansible_aws_ssm_plugin: /usr/local/bin/session-manager-plugin
+ansible_python_interpreter: /usr/bin/python3

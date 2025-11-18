@@ -1,0 +1,34 @@
+- hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Disable any active swap now
+      ansible.posix.mount:
+        name: none
+        fstype: swap
+        state: absent
+      tags: [swap]
+
+    - name: Remove swap from fstab (persist)
+      ansible.posix.mount:
+        name: none
+        src: none
+        fstype: swap
+        opts: defaults
+        state: absent
+      tags: [swap]
+
+    - name: Verify swap is disabled
+      command: cat /proc/swaps
+      register: swaps
+      changed_when: false
+      tags: [swap]
+
+    - name: Assert swap disabled
+      assert:
+        that: swaps.stdout_lines | length == 1
+        success_msg: "Swap disabled"
+        fail_msg: "Swap entries still present"
+      tags: [swap]
+

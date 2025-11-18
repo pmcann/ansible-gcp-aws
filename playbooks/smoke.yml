@@ -1,0 +1,13 @@
+---
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: Write marker
+      copy:
+        content: "ansible-ok {{ inventory_hostname }}\n"
+        dest: /tmp/ansible-ok.txt
+        mode: '0644'
+    - name: Show whoami and kernel
+      command: sh -lc 'id -un; uname -a'
+      register: out
+    - debug: var=out.stdout_lines

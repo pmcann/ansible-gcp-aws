@@ -1,0 +1,29 @@
+plugin: amazon.aws.aws_ec2
+regions: [us-east-1]
+
+filters:
+  instance-state-name: running
+  tag:Name:
+    - TripFinderMaster
+    - TripFinderWorker1
+    - TripFinderWorker2
+
+# Make hosts show up as i-xxxxxxxx
+hostnames:
+  - instance-id
+
+compose:
+  # Explicit SSM target and fallbacks
+  ansible_aws_ssm_instance_id: "{{ instance_id }}"
+  ansible_aws_ssm_target: "{{ instance_id }}"
+  ansible_host: "{{ private_ip_address | default(private_dns_name) }}"
+
+keyed_groups:
+  - key: tags.Name
+    prefix: "name_"
+    separator: ""
+  - key: tags.Role
+    prefix: "role_"
+    separator: ""
+
+cache: false

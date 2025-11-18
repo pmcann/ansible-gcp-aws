@@ -1,0 +1,32 @@
+# OS/editor
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Python/Ansible artifacts
+__pycache__/
+*.retry
+.ansible/
+_fetch/
+*.log
+
+# Collections (installed via requirements)
+collections/ansible_collections/
+
+# Secrets & creds (adjust as needed)
+*.pem
+*.key
+*.crt
+*.p12
+*.kubeconfig
+*.env
+.env*
+.aws/
+**/vault_pass.txt
+
+# Local inventories or host_vars you don't want in Git
+inventory.local*
+host_vars/*/secrets.yml
+group_vars/*/secrets.yml
