@@ -1,10 +1,12 @@
+# playbooks/bootstrap.yml
 - name: Base bootstrap for EC2 via SSM (Kubernetes-friendly)
   hosts: all
   become: true
   gather_facts: true
 
   tasks:
-    # 1) Prereqs for repo/keyring
+    # --- APT prereqs & Kubernetes repository/keyring ---
+
     - name: Ensure base dependencies present
       ansible.builtin.apt:
         name:
@@ -60,16 +62,74 @@
         state: present
       tags: [bootstrap, "bootstrap:k8s"]
 
-    # …your other tasks (disable swap, sysctl, journald persistence, etc.) …
+    # --- Swap disabled (runtime + persistent) ---
+
+    - name: Disable any active swap now
+      ansible.posix.mount:
+        name: none
+        fstype: swap
+        state: absent
+      tags: [bootstrap, "bootstrap:swap"]
+
+    - name: Remove swap from fstab (persist across reboots)
+      ansible.posix.mount:
+        path: none
+        fstype: swap
+        state: absent
+      tags: [bootstrap, "bootstrap:swap"]
+
+    # --- Kernel modules for Kubernetes ---
+
+    - name: Write kernel modules config for Kubernetes networking
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        mode: '0644'
+        content: |
+          overlay
+          br_netfilter
+      tags: [bootstrap, "bootstrap:kernelmods"]
+
+    - name: Load overlay module now
+      ansible.builtin.command: modprobe overlay
+      changed_when: false
+      failed_when: false
+      tags: [bootstrap, "bootstrap:kernelmods"]
+
+    - name: Load br_netfilter module now
+      ansible.builtin.command: modprobe br_netfilter
+      changed_when: false
+      failed_when: false
+      tags: [bootstrap, "bootstrap:kernelmods"]
+
+    # --- Sysctls (persistent + applied immediately) ---
+
+    - name: Ensure Kubernetes sysctls are set (persistent + runtime)
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+        sysctl_file: /etc/sysctl.d/99-k8s.conf
+      loop:
+        - { name: 'net.bridge.bridge-nf-call-iptables',  value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+        - { name: 'net.ipv4.ip_forward',                 value: '1' }
+      tags: [bootstrap, "bootstrap:sysctl"]
+
+    # --- Journald persistence for log survival across reboots ---
+
+    - name: Ensure journald is persistent
+      ansible.builtin.lineinfile:
+        path: /etc/systemd/journald.conf
+        regexp: '^#?Storage='
+        line: 'Storage=persistent'
+      notify: Restart journald
+      tags: [bootstrap, "bootstrap:logs"]
 
   handlers:
     - name: Update apt cache
       ansible.builtin.apt:
         update_cache: yes
-
-    - name: Sysctl reload
-      ansible.builtin.command:
-        argv: [sysctl, --system]
 
     - name: Restart journald
       ansible.builtin.systemd:
