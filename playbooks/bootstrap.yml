@@ -1,70 +1,78 @@
-# playbooks/bootstrap.yml
 - name: Base bootstrap for EC2 via SSM (Kubernetes-friendly)
   hosts: all
   become: true
   gather_facts: true
 
   tasks:
-    - name: Disable any active swap now
-      ansible.posix.mount:
-        name: none
-        fstype: swap
-        state: absent
-      tags: [bootstrap, "bootstrap:swap"]
+    # 1) Prereqs for repo/keyring
+    - name: Ensure base dependencies present
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: yes
+      tags: [bootstrap, "bootstrap:apt"]
 
-    - name: Remove swap from fstab (persist across reboots)
-      ansible.posix.mount:
-        path: none
-        fstype: swap
-        state: absent
-      tags: [bootstrap, "bootstrap:swap"]
+    - name: Ensure keyring directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+      tags: [bootstrap, "bootstrap:apt"]
 
-    - name: Write kernel modules config for Kubernetes networking
-      copy:
-        dest: /etc/modules-load.d/k8s.conf
-        content: |
-          overlay
-          br_netfilter
-        owner: root
-        group: root
+    - name: Download Kubernetes Release.key
+      ansible.builtin.get_url:
+        url: https://pkgs.k8s.io/core:/stable:/v1.32/deb/Release.key
+        dest: /etc/apt/keyrings/kubernetes-release.key
         mode: '0644'
-      notify: Load k8s kernel modules
-      tags: [bootstrap, "bootstrap:kernelmods"]
+      tags: [bootstrap, "bootstrap:apt"]
 
-    - name: Write sysctl file for Kubernetes networking
-      copy:
-        dest: /etc/sysctl.d/99-k8s.conf
-        content: |
-          net.bridge.bridge-nf-call-iptables = 1
-          net.bridge.bridge-nf-call-ip6tables = 1
-          net.ipv4.ip_forward = 1
-        owner: root
-        group: root
-        mode: '0644'
-      notify: Sysctl reload
-      tags: [bootstrap, "bootstrap:sysctl"]
+    - name: Convert Release.key to GPG keyring (one-time)
+      ansible.builtin.command:
+        argv:
+          - gpg
+          - --dearmor
+          - -o
+          - /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+          - /etc/apt/keyrings/kubernetes-release.key
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      notify: Update apt cache
+      tags: [bootstrap, "bootstrap:apt"]
 
-    - name: Ensure journald is persistent
-      lineinfile:
-        path: /etc/systemd/journald.conf
-        regexp: '^#?Storage='
-        line: 'Storage=persistent'
-      notify: Restart journald
-      tags: [bootstrap, "bootstrap:logs"]
+    - name: Add Kubernetes apt repository
+      ansible.builtin.apt_repository:
+        repo: 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /'
+        filename: kubernetes
+        state: present
+      notify: Update apt cache
+      tags: [bootstrap, "bootstrap:apt"]
+
+    - name: Install Kubernetes packages (example pin)
+      ansible.builtin.apt:
+        name:
+          - kubelet=1.32.*-1.1
+          - kubeadm=1.32.*-1.1
+          - kubectl=1.32.*-1.1
+        state: present
+      tags: [bootstrap, "bootstrap:k8s"]
+
+    # …your other tasks (disable swap, sysctl, journald persistence, etc.) …
 
   handlers:
-    - name: Load k8s kernel modules
-      community.general.modprobe:
-        name: "{{ item }}"
-        state: present
-      loop:
-        - overlay
-        - br_netfilter
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
 
     - name: Sysctl reload
-      command: sysctl -p /etc/sysctl.d/99-k8s.conf
+      ansible.builtin.command:
+        argv: [sysctl, --system]
 
     - name: Restart journald
-      systemd:
+      ansible.builtin.systemd:
         name: systemd-journald
         state: restarted
+
