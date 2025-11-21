@@ -4,9 +4,21 @@
   become: true
   gather_facts: true
 
-  tasks:
-    # --- APT prereqs & Kubernetes repository/keyring ---
+  vars:
+    k8s_repo_url: "https://pkgs.k8s.io/core:/stable:/v1.32/deb/"
+    k8s_key_path: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    k8s_release_key: /etc/apt/keyrings/kubernetes-release.key
+    k8s_packages:
+      - kubelet=1.32.*-1.1
+      - kubeadm=1.32.*-1.1
+      - kubectl=1.32.*-1.1
+    sysctls:
+      - { name: "net.bridge.bridge-nf-call-iptables", value: "1" }
+      - { name: "net.bridge.bridge-nf-call-ip6tables", value: "1" }
+      - { name: "net.ipv4.ip_forward", value: "1" }
 
+  tasks:
+    # ---------- APT prereqs + Kubernetes repo ----------
     - name: Ensure base dependencies present
       ansible.builtin.apt:
         name:
@@ -27,8 +39,8 @@
 
     - name: Download Kubernetes Release.key
       ansible.builtin.get_url:
-        url: https://pkgs.k8s.io/core:/stable:/v1.32/deb/Release.key
-        dest: /etc/apt/keyrings/kubernetes-release.key
+        url: "{{ k8s_repo_url }}Release.key"
+        dest: "{{ k8s_release_key }}"
         mode: '0644'
       tags: [bootstrap, "bootstrap:apt"]
 
@@ -38,48 +50,42 @@
           - gpg
           - --dearmor
           - -o
-          - /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-          - /etc/apt/keyrings/kubernetes-release.key
+          - "{{ k8s_key_path }}"
+          - "{{ k8s_release_key }}"
       args:
-        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        creates: "{{ k8s_key_path }}"
       notify: Update apt cache
       tags: [bootstrap, "bootstrap:apt"]
 
     - name: Add Kubernetes apt repository
       ansible.builtin.apt_repository:
-        repo: 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /'
+        repo: "deb [signed-by={{ k8s_key_path }}] {{ k8s_repo_url }} /"
         filename: kubernetes
         state: present
       notify: Update apt cache
       tags: [bootstrap, "bootstrap:apt"]
 
-    - name: Install Kubernetes packages (example pin)
+    - name: Install Kubernetes packages (pinned)
       ansible.builtin.apt:
-        name:
-          - kubelet=1.32.*-1.1
-          - kubeadm=1.32.*-1.1
-          - kubectl=1.32.*-1.1
+        name: "{{ k8s_packages }}"
         state: present
       tags: [bootstrap, "bootstrap:k8s"]
 
-    # --- Swap disabled (runtime + persistent) ---
-
+    # ---------- Swap off + persist ----------
     - name: Disable any active swap now
-      ansible.posix.mount:
-        name: none
-        fstype: swap
-        state: absent
-      tags: [bootstrap, "bootstrap:swap"]
+      ansible.builtin.command: swapoff -a
+      changed_when: false
+      failed_when: false
+      tags: [bootstrap, "bootstrap:kernel"]
 
     - name: Remove swap from fstab (persist across reboots)
-      ansible.posix.mount:
-        path: none
-        fstype: swap
-        state: absent
-      tags: [bootstrap, "bootstrap:swap"]
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^\s*([^#\s]+\s+){2}swap\s+'
+        replace: '# \g<0>'
+      tags: [bootstrap, "bootstrap:kernel"]
 
-    # --- Kernel modules for Kubernetes ---
-
+    # ---------- Kernel modules + sysctls ----------
     - name: Write kernel modules config for Kubernetes networking
       ansible.builtin.copy:
         dest: /etc/modules-load.d/k8s.conf
@@ -87,51 +93,46 @@
         content: |
           overlay
           br_netfilter
-      tags: [bootstrap, "bootstrap:kernelmods"]
+      tags: [bootstrap, "bootstrap:kernel"]
 
     - name: Load overlay module now
-      ansible.builtin.command: modprobe overlay
-      changed_when: false
-      failed_when: false
-      tags: [bootstrap, "bootstrap:kernelmods"]
+      ansible.builtin.modprobe:
+        name: overlay
+        state: present
+      tags: [bootstrap, "bootstrap:kernel"]
 
     - name: Load br_netfilter module now
-      ansible.builtin.command: modprobe br_netfilter
-      changed_when: false
-      failed_when: false
-      tags: [bootstrap, "bootstrap:kernelmods"]
-
-    # --- Sysctls (persistent + applied immediately) ---
+      ansible.builtin.modprobe:
+        name: br_netfilter
+        state: present
+      tags: [bootstrap, "bootstrap:kernel"]
 
     - name: Ensure Kubernetes sysctls are set (persistent + runtime)
-      ansible.posix.sysctl:
+      ansible.builtin.sysctl:
         name: "{{ item.name }}"
         value: "{{ item.value }}"
         state: present
-        reload: yes
         sysctl_file: /etc/sysctl.d/99-k8s.conf
-      loop:
-        - { name: 'net.bridge.bridge-nf-call-iptables',  value: '1' }
-        - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
-        - { name: 'net.ipv4.ip_forward',                 value: '1' }
-      tags: [bootstrap, "bootstrap:sysctl"]
+        reload: yes
+      loop: "{{ sysctls }}"
+      tags: [bootstrap, "bootstrap:kernel"]
 
-    # --- Journald persistence for log survival across reboots ---
-
+    # ---------- journald persistence ----------
     - name: Ensure journald is persistent
       ansible.builtin.lineinfile:
         path: /etc/systemd/journald.conf
-        regexp: '^#?Storage='
+        regexp: '^#?\s*Storage='
         line: 'Storage=persistent'
+        create: yes
+        mode: '0644'
       notify: Restart journald
-      tags: [bootstrap, "bootstrap:logs"]  
-        # --- Containerd + Kubelet prep -----------------------------------------
+      tags: [bootstrap, "bootstrap:os"]
+
+    # ---------- containerd runtime ----------
     - name: Ensure containerd installed
       ansible.builtin.apt:
-        name:
-          - containerd
+        name: containerd
         state: present
-        update_cache: yes
       tags: [bootstrap, "bootstrap:containerd"]
 
     - name: Ensure containerd config directory exists
@@ -141,48 +142,49 @@
         mode: '0755'
       tags: [bootstrap, "bootstrap:containerd"]
 
-    - name: Generate default containerd config if missing
-      ansible.builtin.command:
-        argv: [containerd, config, default]
-      register: _containerd_default
-      changed_when: _containerd_default.rc == 0
-      args:
-        creates: /etc/containerd/config.toml
-      tags: [bootstrap, "bootstrap:containerd"]
-
-    - name: Write containerd config with SystemdCgroup=true
+    - name: Write containerd config (v2, SystemdCgroup=true)
       ansible.builtin.copy:
         dest: /etc/containerd/config.toml
         mode: '0644'
-        content: >
-          {{ _containerd_default.stdout if _containerd_default.stdout is defined
-          else lookup('ansible.builtin.file', '/etc/containerd/config.toml') }}
-      when: _containerd_default is defined
+        content: |
+          version = 2
+
+          [plugins."io.containerd.grpc.v1.cri"]
+            sandbox_image = "registry.k8s.io/pause:3.9"
+
+          [plugins."io.containerd.grpc.v1.cri".containerd]
+            default_runtime_name = "runc"
+
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+            runtime_type = "io.containerd.runc.v2"
+
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+            SystemdCgroup = true
       notify: Restart containerd
       tags: [bootstrap, "bootstrap:containerd"]
 
-    - name: Ensure SystemdCgroup=true in config.toml (idempotent edit)
-      ansible.builtin.replace:
-        path: /etc/containerd/config.toml
-        regexp: '^(\s*SystemdCgroup\s*=\s*)false'
-        replace: '\1true'
-      notify: Restart containerd
+    - name: Validate containerd config (syntax check)
+      ansible.builtin.command:
+        argv: [containerd, config, dump]
+      register: containerd_cfg_check
+      changed_when: false
+      failed_when: containerd_cfg_check.rc != 0
       tags: [bootstrap, "bootstrap:containerd"]
 
     - name: Ensure containerd service enabled and running
       ansible.builtin.systemd:
         name: containerd
-        enabled: true
         state: started
+        enabled: true
       tags: [bootstrap, "bootstrap:containerd"]
 
-    # Kubelet runtime endpoint (safe even before kubelet install)
+    # ---------- kubelet -> containerd wiring ----------
     - name: Ensure kubelet drop-in directory exists
       ansible.builtin.file:
         path: /etc/systemd/system/kubelet.service.d
         state: directory
         mode: '0755'
-      tags: [bootstrap, "bootstrap:kubelet"]
+      tags: [bootstrap, "bootstrap:k8s"]
 
     - name: Configure kubelet to use containerd
       ansible.builtin.copy:
@@ -190,28 +192,22 @@
         mode: '0644'
         content: |
           [Service]
-          Environment="KUBELET_EXTRA_ARGS=--container-runtime=remote --container-runtime-endpoint=unix:///run/containerd/containerd.sock"
-      notify: Reload systemd and restart kubelet
-      tags: [bootstrap, "bootstrap:kubelet"]
+          Environment="KUBELET_KUBEADM_ARGS=--container-runtime=remote --container-runtime-endpoint=unix:///run/containerd/containerd.sock"
+      notify: Restart kubelet
+      tags: [bootstrap, "bootstrap:k8s"]
 
     - name: Hold Kubernetes packages at current major.minor
       ansible.builtin.command:
-        argv: [apt-mark, hold, kubelet, kubeadm, kubectl]
-      register: _hold
-      changed_when: "'kubelet set on hold' in _hold.stdout or 'kubeadm set on hold' in _hold.stdout or 'kubectl set on hold' in _hold.stdout"
+        argv: ["apt-mark", "hold", "kubelet", "kubeadm", "kubectl"]
+      register: hold_out
+      changed_when: "'held back' in hold_out.stdout or 'set on hold' in hold_out.stdout"
       failed_when: false
       tags: [bootstrap, "bootstrap:k8s"]
 
-
   handlers:
-  
     - name: Update apt cache
       ansible.builtin.apt:
         update_cache: yes
-
-    - name: Sysctl reload
-      ansible.builtin.command:
-        argv: [sysctl, --system]
 
     - name: Restart journald
       ansible.builtin.systemd:
@@ -222,10 +218,11 @@
       ansible.builtin.systemd:
         name: containerd
         state: restarted
-        daemon_reload: yes
+        enabled: true
 
-    - name: Reload systemd and restart kubelet
+    - name: Restart kubelet
       ansible.builtin.systemd:
         name: kubelet
         state: restarted
-        daemon_reload: yes
+        enabled: true
+
