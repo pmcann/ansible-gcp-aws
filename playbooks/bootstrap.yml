@@ -124,15 +124,108 @@
         regexp: '^#?Storage='
         line: 'Storage=persistent'
       notify: Restart journald
-      tags: [bootstrap, "bootstrap:logs"]
+      tags: [bootstrap, "bootstrap:logs"]  
+        # --- Containerd + Kubelet prep -----------------------------------------
+    - name: Ensure containerd installed
+      ansible.builtin.apt:
+        name:
+          - containerd
+        state: present
+        update_cache: yes
+      tags: [bootstrap, "bootstrap:containerd"]
+
+    - name: Ensure containerd config directory exists
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        mode: '0755'
+      tags: [bootstrap, "bootstrap:containerd"]
+
+    - name: Generate default containerd config if missing
+      ansible.builtin.command:
+        argv: [containerd, config, default]
+      register: _containerd_default
+      changed_when: _containerd_default.rc == 0
+      args:
+        creates: /etc/containerd/config.toml
+      tags: [bootstrap, "bootstrap:containerd"]
+
+    - name: Write containerd config with SystemdCgroup=true
+      ansible.builtin.copy:
+        dest: /etc/containerd/config.toml
+        mode: '0644'
+        content: >
+          {{ _containerd_default.stdout if _containerd_default.stdout is defined
+          else lookup('ansible.builtin.file', '/etc/containerd/config.toml') }}
+      when: _containerd_default is defined
+      notify: Restart containerd
+      tags: [bootstrap, "bootstrap:containerd"]
+
+    - name: Ensure SystemdCgroup=true in config.toml (idempotent edit)
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: '^(\s*SystemdCgroup\s*=\s*)false'
+        replace: '\1true'
+      notify: Restart containerd
+      tags: [bootstrap, "bootstrap:containerd"]
+
+    - name: Ensure containerd service enabled and running
+      ansible.builtin.systemd:
+        name: containerd
+        enabled: true
+        state: started
+      tags: [bootstrap, "bootstrap:containerd"]
+
+    # Kubelet runtime endpoint (safe even before kubelet install)
+    - name: Ensure kubelet drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/system/kubelet.service.d
+        state: directory
+        mode: '0755'
+      tags: [bootstrap, "bootstrap:kubelet"]
+
+    - name: Configure kubelet to use containerd
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/kubelet.service.d/10-containerd.conf
+        mode: '0644'
+        content: |
+          [Service]
+          Environment="KUBELET_EXTRA_ARGS=--container-runtime=remote --container-runtime-endpoint=unix:///run/containerd/containerd.sock"
+      notify: Reload systemd and restart kubelet
+      tags: [bootstrap, "bootstrap:kubelet"]
+
+    - name: Hold Kubernetes packages at current major.minor
+      ansible.builtin.command:
+        argv: [apt-mark, hold, kubelet, kubeadm, kubectl]
+      register: _hold
+      changed_when: "'kubelet set on hold' in _hold.stdout or 'kubeadm set on hold' in _hold.stdout or 'kubectl set on hold' in _hold.stdout"
+      failed_when: false
+      tags: [bootstrap, "bootstrap:k8s"]
+
 
   handlers:
+  
     - name: Update apt cache
       ansible.builtin.apt:
         update_cache: yes
+
+    - name: Sysctl reload
+      ansible.builtin.command:
+        argv: [sysctl, --system]
 
     - name: Restart journald
       ansible.builtin.systemd:
         name: systemd-journald
         state: restarted
 
+    - name: Restart containerd
+      ansible.builtin.systemd:
+        name: containerd
+        state: restarted
+        daemon_reload: yes
+
+    - name: Reload systemd and restart kubelet
+      ansible.builtin.systemd:
+        name: kubelet
+        state: restarted
+        daemon_reload: yes
