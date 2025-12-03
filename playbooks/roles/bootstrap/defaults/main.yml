@@ -1,0 +1,14 @@
+---
+# roles/bootstrap/defaults/main.yml
+
+# Kubernetes packages (what you're already installing)
+kube_version: "1.32.*-1.1"
+
+# Container runtime package
+containerd_pkg_name: "containerd"
+
+# Whether to disable swap and set kernel/sysctl for Kubernetes
+bootstrap_disable_swap: true
+bootstrap_configure_kernel: true
+bootstrap_configure_journald: true
+

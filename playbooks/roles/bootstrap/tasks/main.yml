@@ -1,0 +1,197 @@
+---
+# roles/bootstrap/tasks/main.yml
+
+# -------------------------------------------------------------------
+# APT base + Kubernetes repo  (bootstrap:apt)
+# -------------------------------------------------------------------
+- name: Install base packages for Kubernetes repo
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+    state: present
+    update_cache: true
+  tags:
+    - bootstrap:apt
+
+- name: Ensure /etc/apt/keyrings exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - bootstrap:apt
+
+- name: Add Kubernetes apt repository (1.32)
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/kubernetes.list
+    content: |
+      deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /
+    owner: root
+    group: root
+    mode: "0644"
+  notify: apt update
+  tags:
+    - bootstrap:apt
+
+# If you had a task to download/import the Release.key -> keyring,
+# move that here too and notify: apt update.
+
+# -------------------------------------------------------------------
+# Kernel / sysctl / swap (bootstrap:kernel, bootstrap:os)
+# -------------------------------------------------------------------
+- name: Disable swap (runtime)
+  ansible.builtin.command: swapoff -a
+  when: bootstrap_disable_swap
+  changed_when: false
+  tags:
+    - bootstrap:kernel
+    - bootstrap:os
+
+- name: Remove swap entries from /etc/fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^\s*([^#]\S+)\s+(\S+)\s+swap\s+.*$'
+    replace: '# \1 \2 swap sw 0 0'
+  when: bootstrap_disable_swap
+  tags:
+    - bootstrap:kernel
+    - bootstrap:os
+
+- name: Ensure kernel modules for Kubernetes
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+    owner: root
+    group: root
+    mode: "0644"
+  when: bootstrap_configure_kernel
+  tags:
+    - bootstrap:kernel
+
+- name: Load kernel modules now
+  ansible.builtin.shell: |
+    modprobe overlay
+    modprobe br_netfilter
+  when: bootstrap_configure_kernel
+  args:
+    executable: /bin/bash
+  changed_when: false
+  tags:
+    - bootstrap:kernel
+
+- name: Set sysctl params for Kubernetes networking
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/k8s.conf
+    content: |
+      net.bridge.bridge-nf-call-iptables=1
+      net.bridge.bridge-nf-call-ip6tables=1
+      net.ipv4.ip_forward=1
+    owner: root
+    group: root
+    mode: "0644"
+  when: bootstrap_configure_kernel
+  notify: reload sysctl
+  tags:
+    - bootstrap:kernel
+
+- name: Ensure journald is persistent
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/journald.conf
+    regexp: '^#?Storage='
+    line: 'Storage=persistent'
+  when: bootstrap_configure_journald
+  notify: restart journald
+  tags:
+    - bootstrap:os
+
+# -------------------------------------------------------------------
+# Containerd configuration (bootstrap:containerd)
+# -------------------------------------------------------------------
+- name: Install containerd
+  ansible.builtin.apt:
+    name: "{{ containerd_pkg_name }}"
+    state: present
+  tags:
+    - bootstrap:containerd
+
+- name: Ensure /etc/containerd exists
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - bootstrap:containerd
+
+- name: Write containerd config.toml with SystemdCgroup=true
+  ansible.builtin.copy:
+    dest: /etc/containerd/config.toml
+    content: |
+      version = 2
+
+      [plugins]
+        [plugins."io.containerd.grpc.v1.cri"]
+          [plugins."io.containerd.grpc.v1.cri".containerd]
+            default_runtime_name = "runc"
+            [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+              [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+                runtime_type = "io.containerd.runc.v2"
+                [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+                  SystemdCgroup = true
+  notify: restart containerd
+  tags:
+    - bootstrap:containerd
+
+# -------------------------------------------------------------------
+# Kubernetes packages + kubelet wiring (bootstrap:k8s)
+# -------------------------------------------------------------------
+- name: Install Kubernetes components (pinned)
+  ansible.builtin.apt:
+    name:
+      - "kubelet={{ kube_version }}"
+      - "kubeadm={{ kube_version }}"
+      - "kubectl={{ kube_version }}"
+    state: present
+  tags:
+    - bootstrap:k8s
+
+- name: Hold Kubernetes packages
+  ansible.builtin.shell: |
+    set -o errexit
+    apt-mark hold kubelet kubeadm kubectl
+  args:
+    executable: /bin/bash
+  changed_when: false
+  tags:
+    - bootstrap:k8s
+
+- name: Ensure kubelet drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/kubelet.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - bootstrap:k8s
+
+- name: Configure kubelet for containerd
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/kubelet.service.d/0-containerd.conf
+    content: |
+      [Service]
+      Environment="KUBELET_EXTRA_ARGS=--container-runtime=remote --container-runtime-endpoint=unix:///run/containerd/containerd.sock"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart kubelet
+  tags:
+    - bootstrap:k8s
