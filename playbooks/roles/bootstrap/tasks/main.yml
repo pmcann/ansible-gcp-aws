@@ -12,9 +12,9 @@
       - gnupg
       - lsb-release
     state: present
-    update_cache: true
   tags:
     - bootstrap:apt
+    - bootstrap:k8s  
 
 - name: Ensure /etc/apt/keyrings exists
   ansible.builtin.file:
@@ -25,6 +25,29 @@
     mode: "0755"
   tags:
     - bootstrap:apt
+    - bootstrap:k8s
+
+- name: Download Kubernetes Release.key for v1.32
+  ansible.builtin.get_url:
+    url: https://pkgs.k8s.io/core:/stable:/v1.32/deb/Release.key
+    dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+    mode: "0644"
+  tags:
+    - bootstrap:apt
+    - bootstrap:k8s
+
+- name: Convert Kubernetes Release.key to GPG keyring
+  ansible.builtin.command:
+    cmd: >
+      gpg --dearmor
+      -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      /etc/apt/keyrings/kubernetes-apt-keyring.asc
+  args:
+    creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  notify: apt update
+  tags:
+    - bootstrap:apt
+    - bootstrap:k8s
 
 - name: Add Kubernetes apt repository (1.32)
   ansible.builtin.copy:
